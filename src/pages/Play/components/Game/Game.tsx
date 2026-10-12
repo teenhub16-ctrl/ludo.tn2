@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import BotDebugPanel from './BotDebugPanel';
 import { registerNewPlayer, setPlayerSequence } from '../../../../state/slices/playersSlice';
 import Board from '../Board/Board';
 import { useDispatch, useSelector, useStore } from 'react-redux';
@@ -126,6 +127,7 @@ export default function Game({ initData }: Props) {
         } as React.CSSProperties
       }
     >
+    <BotDebugPanel />  
       <Board />
       <button
         type="button"

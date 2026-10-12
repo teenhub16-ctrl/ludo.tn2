@@ -15,6 +15,7 @@ import { type RootState } from '../state/store';
 import { ERRORS } from '../utils/errors';
 import { saveState } from '../game/storage/saveState';
 import { deleteSaveFromStorage } from '../game/storage/storage';
+import { playSound } from '../utils/sounds';
 
 export function useMoveAndCaptureToken() {
   const moveToken = useMoveTokenForward();
@@ -45,6 +46,11 @@ export function useMoveAndCaptureToken() {
       const hasPlayerWon = nextState.players.players
         .find((p) => p.colour === token.colour)!
         .tokens.every((t) => t.hasTokenReachedHome);
+      if (hasPlayerWon) {
+        playSound('victory');
+      } else if (hasTokenReachedHome) {
+        playSound('homeEntry');
+      }
       if (hasTokenReachedHome)
         dispatch(markTokenAsReachedHome({ colour: token.colour, id: token.id }));
       return {

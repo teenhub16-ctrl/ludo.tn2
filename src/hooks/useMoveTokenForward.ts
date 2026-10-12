@@ -9,7 +9,8 @@ import { deactivateAllTokens, getToken, setIsAnyTokenMoving } from '../state/sli
 import { tokenMotionRegistry } from '../game/movement/tokenMotionRegistry';
 import { getGloballyUniqueTokenId } from '../game/tokens/logic';
 import { useCoordsToPosition } from './useCoordsToPosition';
-import { transitionStates } from '../game/tokens/constants';
+import { transitionStates, TOKEN_SAFE_COORDINATES } from '../game/tokens/constants';
+import { playSound } from '../utils/sounds';
 
 export const useMoveTokenForward = () => {
   const dispatch = useDispatch<AppDispatch>();
@@ -34,7 +35,15 @@ export const useMoveTokenForward = () => {
         updateTokenPositionAndAlignment({ colour, id, newCoords: coord, direction: 'forward' });
         const updatedToken = getToken(store.getState().players, colour, id);
         const { x, y } = getPosition(coord, updatedToken.tokenAlignmentData);
-        await entry.animateTo(x, y, { duration: durationMs / 1000, ease: timingFn });
+                       await entry.animateTo(x, y, { duration: durationMs / 1000, ease: timingFn });
+        playSound('tokenMove'); 
+      }
+      const lastCoord = moveSequence[moveSequence.length - 1];
+      if (
+        lastCoord &&
+        TOKEN_SAFE_COORDINATES.some((c) => c.x === lastCoord.x && c.y === lastCoord.y)
+      ) {
+        playSound('safeSpot');
       }
       entry.setExternallyAnimating(false);
       dispatch(setIsAnyTokenMoving(false));

@@ -125,6 +125,7 @@ const reducers = {
     token.direction = 'forward';
     token.coordinates = TOKEN_START_COORDINATES[action.payload.colour];
   },
+
   lockToken: (state: TPlayerState, action: PayloadAction<TTokenColourAndId>) => {
     const token = getToken(state, action.payload.colour, action.payload.id);
     if (token.isLocked)
@@ -147,6 +148,7 @@ const reducers = {
   setIsAnyTokenMoving: (state: TPlayerState, action: PayloadAction<boolean>) => {
     state.isAnyTokenMoving = action.payload;
   },
+
   markTokenAsReachedHome: (state: TPlayerState, action: PayloadAction<TTokenColourAndId>) => {
     if (state.isGameEnded) return;
     const token = getToken(state, action.payload.colour, action.payload.id);
@@ -157,16 +159,28 @@ const reducers = {
     if (!hasPlayerWon) return;
     player.playerFinishTime = Date.now();
     state.playerFinishOrder.push({ name: player.name, colour: action.payload.colour });
-    if (state.playerFinishOrder.length === state.playerSequence.length - 1) {
-      const finishedColours = state.playerFinishOrder.map((p) => p.colour);
-      const lastColour = state.playerSequence.find((c) => !finishedColours.includes(c))!;
-      state.playerFinishOrder.push({
-        name: getPlayer(state, lastColour).name,
-        colour: lastColour,
-      });
-      state.isGameEnded = true;
-    }
+    state.isGameEnded = true;
   },
+
+  endGameByTimeout: (state: TPlayerState, action: PayloadAction<TPlayerColour>) => {
+    if (state.isGameEnded) return;
+    const withdrawnPlayer = getPlayer(state, action.payload);
+    withdrawnPlayer.playerFinishTime = Date.now();
+    state.playerSequence.forEach((colour) => {
+      if (colour !== action.payload) {
+        const p = getPlayer(state, colour);
+        if (!state.playerFinishOrder.some((f) => f.colour === colour)) {
+          state.playerFinishOrder.push({ name: p.name, colour });
+        }
+      }
+    });
+    state.playerFinishOrder.push({
+      name: withdrawnPlayer.name,
+      colour: action.payload,
+    });
+    state.isGameEnded = true;
+  },
+
   setTokenAlignmentData: (
     state: TPlayerState,
     action: PayloadAction<{
@@ -178,6 +192,7 @@ const reducers = {
     const token = getToken(state, action.payload.colour, action.payload.id);
     token.tokenAlignmentData = action.payload.newAlignmentData;
   },
+
   clearPlayersState: () => initialState,
 };
 
@@ -200,6 +215,7 @@ export const {
   resetNumberOfConsecutiveSix,
   setIsAnyTokenMoving,
   markTokenAsReachedHome,
+  endGameByTimeout,
   setTokenAlignmentData,
   clearPlayersState,
 } = playersSlice.actions;

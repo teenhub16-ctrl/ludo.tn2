@@ -6,7 +6,6 @@
   align-items: center;
   background-image: url('../../assets/bg.jpg');
 }
-
 .player-setup-dialog {
   position: relative;
   display: flex;

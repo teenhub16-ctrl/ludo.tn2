@@ -1,9 +1,7 @@
 import type { TCoordinate, TPlayerColour } from '../../types';
 import type { TToken } from '../../types';
-import { isTokenMovable } from '../tokens/logic';
 import {
   isCoordASafeSpot,
-  isCoordInHomeEntryPathForColour,
   isTokenAhead,
   getDistanceBetweenTokens,
   getDistanceInTokenPath,
@@ -11,261 +9,378 @@ import {
   areCoordsEqual,
   getFinalCoord,
 } from '../coords/logic';
-import { expandedGeneralTokenPath, tokenPaths } from '../tokens/paths';
-import { LOGIC_CONFIG, WEIGHTS } from './constants';
+import { tokenPaths } from '../tokens/paths';
 
+// ================================================================
+// ملف الطائر
+// ================================================================
+type TokenProfile = {
+  token: TToken;
+  distToHome: number;
+  distTraveled: number;
+  isOnStar: boolean;
+  weightedThreats: number;
+  isRealSafeNow: boolean;
+  nearestBehind: number;
+  nearestAhead: number;
+  huntingBonus: number;
+};
+
+// ================================================================
+// الأوزان
+// ================================================================
+const W = {
+  REACH_HOME: 100_000_000,
+  EAT_HUMAN_BASE: 8_000_000,
+  EAT_HUMAN_PER_PROGRESS: 60_000,
+  EAT_HUMAN_URGENT: 5_000_000,
+  EXIT_AT_SIX: 2_500_000,
+
+  ENTER_STAR: 900_000,
+  STAY_ON_STAR: 700_000,
+  ESCAPE_DANGER: 1_500_000,
+  PROGRESS_PER_TILE: 3_000,
+  BACKWARD_BONUS: 150_000,
+  EAT_TEAMMATE: 150_000,
+
+  THREAT_AT_1: 3_000_000,
+  THREAT_AT_2: 2_200_000,
+  THREAT_AT_3: 1_500_000,
+  THREAT_AT_4: 900_000,
+  THREAT_AT_5: 500_000,
+  THREAT_AT_6: 250_000,
+
+  HUNTING_BONUS_AT_1: 250_000,
+  HUNTING_BONUS_AT_2: 150_000,
+  HUNTING_BONUS_AT_3: 80_000,
+  HUNTING_BONUS_AT_6: 30_000,
+
+  LEAVE_STAR_BASE: 10_000_000,
+  LEAVE_STAR_PER_PROGRESS: 300_000,
+  LEAVE_STAR_TO_DANGER_EXTRA: 15_000_000,
+  SAFE_TO_DANGER: 5_000_000,
+  STACK_ON_TEAMMATE: 500_000,
+  PROGRESS_TAX: 100,
+};
+
+// ================================================================
+// الدالة الرئيسية
+// ================================================================
 export function selectBestTokenForBot(
   botPlayerColour: TPlayerColour,
   diceNumber: number,
-  allTokens: TToken[]
+  allTokens: TToken[],
+  teamColours: TPlayerColour[],
+  othersTargeted: Set<string>
 ): TToken | null {
-  const botTokens = allTokens.filter((t) => t.colour === botPlayerColour);
-  const movableBotTokens = botTokens.filter((t) => isTokenMovable(t, diceNumber));
-  const botTokenHomeCoord = getHomeCoordForColour(botPlayerColour);
-  const botTokenStartCoord = tokenPaths[botPlayerColour][0];
-  const activeOpponentTokens = allTokens.filter(
-    (t) =>
-      t.colour !== botPlayerColour &&
-      isTokenMovable(t) &&
-      expandedGeneralTokenPath.find((c) => areCoordsEqual(t.coordinates, c))
+  const enemyColours = new Set(
+    [...new Set(allTokens.map((t) => t.colour))].filter((c) => !teamColours.includes(c))
   );
+  const enemyTokens = allTokens.filter(
+    (t) => enemyColours.has(t.colour) && !t.hasTokenReachedHome
+  );
+  const myTokens = allTokens.filter(
+    (t) => t.colour === botPlayerColour && !t.hasTokenReachedHome
+  );
+  if (myTokens.length === 0) return null;
 
-  const tokenScores = botTokens.map<{ token: TToken; feasibilityScore: number }>((token) => {
-    let feasibilityScore = 0;
-    let finalCoord: TCoordinate | null = null;
+  // ============================================================
+  // 1. الوصول للنهاية
+  // ============================================================
+  const homeCoord = getHomeCoordForColour(botPlayerColour);
+  for (const token of myTokens) {
+    if (token.isLocked) continue;
+    const d = getDistanceInTokenPath(token.colour, token.coordinates, homeCoord);
+    if (d === diceNumber) return token;
+  }
 
-    // Always try to unlock a new token if we rolled a 6.
-    const isUnlockable =
-      token.isLocked && !token.hasTokenReachedHome && diceNumber === LOGIC_CONFIG.UNLOCK_DICE_VALUE;
-    if (isUnlockable) {
-      feasibilityScore += WEIGHTS.UNLOCK_BONUS;
-      finalCoord = tokenPaths[token.colour][0];
+  // ============================================================
+  // 2. أكل بشر (أولوية مطلقة)
+  // ============================================================
+  const humanEater = findHumanEater(myTokens, diceNumber, enemyTokens, othersTargeted);
+  if (humanEater) return humanEater;
+
+  // ============================================================
+  // 3. التقييم العادي (يشمل الإخراج عند 6، أكل الزميل، البقاء في نجمة...)
+  // ============================================================
+  const profiles: TokenProfile[] = myTokens.map((t) => buildProfile(t, enemyTokens));
+
+  const evaluations: { token: TToken; score: number }[] = [];
+  for (const profile of profiles) {
+    const score = scoreMove(profile, profiles, diceNumber, allTokens, enemyTokens, teamColours);
+    if (score !== null) evaluations.push({ token: profile.token, score });
+  }
+
+  if (evaluations.length === 0) return null;
+  evaluations.sort((a, b) => b.score - a.score);
+  const best = evaluations[0].score;
+  const top = evaluations.filter((e) => e.score === best);
+  return top[Math.floor(Math.random() * top.length)].token;
+}
+
+// ================================================================
+// أكل بشر
+// ================================================================
+function findHumanEater(
+  myTokens: TToken[],
+  diceNumber: number,
+  enemyTokens: TToken[],
+  othersTargeted: Set<string>
+): TToken | null {
+  let best: { token: TToken; score: number } | null = null;
+  for (const token of myTokens) {
+    if (token.isLocked) continue;
+    const fc = getFinalCoord(token, diceNumber);
+    if (!fc) continue;
+    for (const enemy of enemyTokens) {
+      if (!areCoordsEqual(enemy.coordinates, fc)) continue;
+      if (isCoordASafeSpot(enemy.coordinates, enemy.colour)) continue;
+      const eDist = getDistanceInTokenPath(
+        enemy.colour,
+        enemy.coordinates,
+        getHomeCoordForColour(enemy.colour)
+      );
+      let score = W.EAT_HUMAN_BASE + (100 - eDist) * W.EAT_HUMAN_PER_PROGRESS;
+      if (eDist <= 10) score += W.EAT_HUMAN_URGENT * (11 - eDist);
+      if (othersTargeted.has(`${enemy.colour}-${enemy.id}`)) score *= 0.4;
+      if (!best || score > best.score) best = { token, score };
+    }
+  }
+  return best?.token ?? null;
+}
+
+// ================================================================
+// بناء ملف الطائر
+// ================================================================
+function buildProfile(token: TToken, enemyTokens: TToken[]): TokenProfile {
+  if (token.isLocked) {
+    return {
+      token,
+      distToHome: 999,
+      distTraveled: 0,
+      isOnStar: false,
+      weightedThreats: 0,
+      isRealSafeNow: true,
+      nearestBehind: 999,
+      nearestAhead: 999,
+      huntingBonus: 0,
+    };
+  }
+  const homeCoord = getHomeCoordForColour(token.colour);
+  const distToHome = getDistanceInTokenPath(token.colour, token.coordinates, homeCoord);
+  const distTraveled = tokenPaths[token.colour].length - distToHome;
+  const isOnStar = isCoordASafeSpot(token.coordinates, token.colour);
+  const enemies = readEnemiesAround(token, enemyTokens);
+  return {
+    token,
+    distToHome,
+    distTraveled,
+    isOnStar,
+    weightedThreats: isOnStar ? 0 : enemies.weightedThreats,
+    isRealSafeNow: isOnStar || enemies.weightedThreats === 0,
+    nearestBehind: enemies.nearestBehind,
+    nearestAhead: enemies.nearestAhead,
+    huntingBonus: enemies.huntingBonus,
+  };
+}
+
+// ================================================================
+// قراءة الأعداء حول طائر
+// ================================================================
+type EnemiesAround = {
+  weightedThreats: number;
+  nearestBehind: number;
+  nearestAhead: number;
+  huntingBonus: number;
+};
+
+function readEnemiesAround(token: TToken, enemyTokens: TToken[]): EnemiesAround {
+  const result: EnemiesAround = {
+    weightedThreats: 0,
+    nearestBehind: 999,
+    nearestAhead: 999,
+    huntingBonus: 0,
+  };
+  for (const enemy of enemyTokens) {
+    const dist = getDistanceBetweenTokens(token, enemy);
+    if (dist < 1 || dist > 6) continue;
+    // isTokenAhead(token, enemy) = true → token متقدم على enemy → enemy خلفي
+    if (isTokenAhead(token, enemy)) {
+      if (dist < result.nearestBehind) result.nearestBehind = dist;
+      result.weightedThreats += threatByDistance(dist);
     } else {
-      finalCoord = getFinalCoord(token, diceNumber);
-      // If the move is not allowed (like going past the finish line), stop here.
-      if (!isTokenMovable(token, diceNumber))
-        return { token, feasibilityScore: Number.NEGATIVE_INFINITY };
+      if (dist < result.nearestAhead) result.nearestAhead = dist;
+      result.huntingBonus += huntingBonusByDistance(dist);
     }
+  }
+  return result;
+}
 
-    if (!finalCoord) return { token, feasibilityScore: Number.NEGATIVE_INFINITY };
+function readEnemiesAroundCoord(coord: TCoordinate, movingToken: TToken, enemyTokens: TToken[]): EnemiesAround {
+  const dummy = { ...movingToken, coordinates: coord };
+  return readEnemiesAround(dummy, enemyTokens);
+}
 
-    const isFinalCoordSafe = isCoordASafeSpot(finalCoord, token.colour);
-    const isCurrentCoordSafe = isCoordASafeSpot(token.coordinates, token.colour);
-    const botTokensAtHome = botTokens.filter((t) => t.hasTokenReachedHome).length;
+function threatByDistance(dist: number): number {
+  switch (dist) {
+    case 1: return W.THREAT_AT_1;
+    case 2: return W.THREAT_AT_2;
+    case 3: return W.THREAT_AT_3;
+    case 4: return W.THREAT_AT_4;
+    case 5: return W.THREAT_AT_5;
+    case 6: return W.THREAT_AT_6;
+    default: return 0;
+  }
+}
 
-    // Play more carefully if we are close to winning the game.
-    const endgameMultiplier =
-      botTokensAtHome >= LOGIC_CONFIG.ENDGAME_TOKEN_COUNT
-        ? LOGIC_CONFIG.ENDGAME_SCORE_MULTIPLIER
-        : LOGIC_CONFIG.DEFAULT_MULTIPLIER;
+function huntingBonusByDistance(dist: number): number {
+  switch (dist) {
+    case 1: return W.HUNTING_BONUS_AT_1;
+    case 2: return W.HUNTING_BONUS_AT_2;
+    case 3: return W.HUNTING_BONUS_AT_3;
+    case 4:
+    case 5:
+    case 6: return W.HUNTING_BONUS_AT_6;
+    default: return 0;
+  }
+}
 
-    const safetyMultiplier =
-      botTokensAtHome > LOGIC_CONFIG.SAFETY_TOKEN_COUNT
-        ? LOGIC_CONFIG.SAFETY_SCORE_MULTIPLIER
-        : LOGIC_CONFIG.DEFAULT_MULTIPLIER;
+// ================================================================
+// تقييم حركة
+// ================================================================
+function scoreMove(
+  profile: TokenProfile,
+  allProfiles: TokenProfile[],
+  diceNumber: number,
+  allTokens: TToken[],
+  enemyTokens: TToken[],
+  teamColours: TPlayerColour[]
+): number | null {
+  const { token, distToHome, distTraveled, isOnStar } = profile;
 
-    // Check if we can capture any enemies with this move.
-    const capturableTokens = allTokens.filter(
-      (t) =>
-        t.colour !== botPlayerColour &&
-        areCoordsEqual(finalCoord, t.coordinates) &&
-        !isCoordASafeSpot(t.coordinates, t.colour)
-    );
-    capturableTokens.forEach((t) => {
-      const distToEnd = getDistanceInTokenPath(
-        t.colour,
-        t.coordinates,
-        getHomeCoordForColour(t.colour)
-      );
-      const distTraveled = tokenPaths[t.colour].length - distToEnd;
+  // ============================================================
+  // طائر مقفل: يخرج فقط بـ 6 (يُقيَّم مع باقي الخيارات)
+  // ============================================================
+  if (token.isLocked) {
+    if (diceNumber !== 6) return null;
+    const startCoord = tokenPaths[token.colour][0];
+    const startIsStar = isCoordASafeSpot(startCoord, token.colour);
+    let score = W.EXIT_AT_SIX;
+    if (startIsStar) score += W.ENTER_STAR;
+    const enemiesAtStart = readEnemiesAroundCoord(startCoord, token, enemyTokens);
+    score -= enemiesAtStart.weightedThreats;
+    return score;
+  }
 
-      // Score points for capturing. Capture is worth more if the enemy has traveled far.
-      feasibilityScore +=
-        WEIGHTS.CAPTURE_BASE + distTraveled * WEIGHTS.OPPONENT_PROGRESS_MULTIPLIER;
-    });
+  const finalCoord = getFinalCoord(token, diceNumber);
+  if (!finalCoord) return null;
 
-    // Give a bonus for landing on a safe spot.
-    if (isFinalCoordSafe) feasibilityScore += WEIGHTS.SAFE_POSITION_BONUS;
+  const finalIsStar = isCoordASafeSpot(finalCoord, token.colour);
+  const enemiesAtFinal = readEnemiesAroundCoord(finalCoord, token, enemyTokens);
 
-    const isTokenAlreadyInHomeEntryPath = isCoordInHomeEntryPathForColour(
-      token.coordinates,
-      token.colour
-    );
-    const willTokenBeInHomeEntryPath = isCoordInHomeEntryPathForColour(finalCoord, token.colour);
+  let score = 0;
 
-    // Reward the token for entering the home entry path.
-    if (willTokenBeInHomeEntryPath && !isTokenAlreadyInHomeEntryPath)
-      feasibilityScore += WEIGHTS.HOME_ENTRY_BONUS;
-
-    // Avoid moving tokens that are already safe inside the home path.
-    if (isTokenAlreadyInHomeEntryPath) feasibilityScore -= WEIGHTS.SAFE_TOKEN_MOVE_PENALTY;
-
-    // If the token is still locked, we are done calculating.
-    if (token.isLocked) return { token, feasibilityScore };
-
-    const distFromHome = getDistanceInTokenPath(token.colour, token.coordinates, botTokenHomeCoord);
-    const distFromStart = getDistanceInTokenPath(
-      token.colour,
-      token.coordinates,
-      botTokenStartCoord
-    );
-    const botTokensInCurrentCoord = movableBotTokens.filter((t) =>
-      areCoordsEqual(t.coordinates, token.coordinates)
-    ).length;
-
-    // Big bonus if this move finishes the game for this token.
-    const canTokenReachHome = distFromHome === diceNumber;
-    if (canTokenReachHome) feasibilityScore += WEIGHTS.GOAL_COMPLETION_BONUS;
-
-    // General rule: Try to move tokens that are closer to the finish line.
-    feasibilityScore -= distFromHome * WEIGHTS.BASE_DISTANCE_PENALTY * endgameMultiplier;
-
-    const oppTokensAtCurrentCoord = activeOpponentTokens.filter((oppToken) =>
-      areCoordsEqual(oppToken.coordinates, token.coordinates)
-    ).length;
-
-    // If we are on a safe spot with an enemy and roll a 6, try to leave (to avoid stagnation)
-    const isCrowdedSafeSpotAndRolled6 =
-      diceNumber === LOGIC_CONFIG.UNLOCK_DICE_VALUE &&
-      isCurrentCoordSafe &&
-      oppTokensAtCurrentCoord > 0;
-    if (isCrowdedSafeSpotAndRolled6) feasibilityScore += WEIGHTS.CROWDED_EXIT_BONUS;
-
-    // Don't put two tokens on the same spot unless it is safe (avoids double kills).
-    const botTokensInFinalCoord = movableBotTokens.filter((t) =>
+  // ============================================================
+  // أكل زميل (بوت آخر) — مكافأة صغيرة
+  // ============================================================
+  const teammateAtDest = allTokens.find(
+    (t) =>
+      teamColours.includes(t.colour) &&
+      t.colour !== token.colour &&
+      !t.hasTokenReachedHome &&
       areCoordsEqual(t.coordinates, finalCoord)
-    ).length;
-    if (botTokensInFinalCoord > 0 && !isFinalCoordSafe) {
-      feasibilityScore -= WEIGHTS.UNSAFE_STACKING_PENALTY;
-    }
-
-    let isSafeLaunchHunter = false;
-
-    let hasRefundedDistance = false;
-
-    // Check every enemy to see if we are chasing them or they are chasing us.
-    for (let i = 0; i < activeOpponentTokens.length; i++) {
-      const oppToken = activeOpponentTokens[i];
-      const isBotTokenAheadOfOppTokenInFuture = isTokenAhead(
-        { ...token, coordinates: finalCoord },
-        oppToken
-      );
-      const futureDist = getDistanceBetweenTokens({ ...token, coordinates: finalCoord }, oppToken);
-      const isBotTokenAheadOfOppTokenCurrently = isTokenAhead(token, oppToken);
-      const currentDist = getDistanceBetweenTokens(token, oppToken);
-
-      // HUNTER LOGIC: We are behind them (chasing).
-      if (
-        currentDist >= 1 &&
-        currentDist <= LOGIC_CONFIG.MAX_CHASE_LOOKAHEAD &&
-        !isBotTokenAheadOfOppTokenCurrently
-      ) {
-        // Check if someone else is chasing US from behind.
-        const isThreatenedFromBehind = activeOpponentTokens.some((t) => {
-          const dist = getDistanceBetweenTokens(token, t);
-          const isOpponentBehind = isTokenAhead(token, t);
-          return isOpponentBehind && dist >= 1 && dist <= LOGIC_CONFIG.MAX_THREAT_LOOKAHEAD;
-        });
-
-        // Safe Hunt: No one is behind us, or we are jumping to a safe spot.
-        if (!isThreatenedFromBehind || isFinalCoordSafe) {
-          if (currentDist <= LOGIC_CONFIG.CRITICAL_COMBAT_RANGE)
-            feasibilityScore += WEIGHTS.SAFE_HUNT_CRITICAL_RANGE_BONUS;
-          feasibilityScore += WEIGHTS.SAFE_CHASE_BASE_BONUS;
-          if (!isThreatenedFromBehind) isSafeLaunchHunter = true;
-        }
-        // Risky Hunt: Someone is behind us, but we want to attack anyway.
-        else if (currentDist <= LOGIC_CONFIG.RISKY_HUNT_RANGE) {
-          feasibilityScore += WEIGHTS.RISKY_CHASE_BASE_BONUS;
-          if (currentDist <= LOGIC_CONFIG.CRITICAL_COMBAT_RANGE)
-            feasibilityScore += WEIGHTS.RISKY_HUNT_CRITICAL_RANGE_BONUS;
-        }
-      }
-
-      // ESCAPE LOGIC: We are ahead of them (being chased).
-      // If we are being chased, prioritize saving tokens that have traveled a long way.
-      if (
-        currentDist >= 1 &&
-        currentDist <= LOGIC_CONFIG.MAX_THREAT_LOOKAHEAD &&
-        isBotTokenAheadOfOppTokenCurrently &&
-        !isCurrentCoordSafe
-      ) {
-        const distFromStart = tokenPaths[token.colour].length - distFromHome;
-        if (distFromStart > LOGIC_CONFIG.HIGH_INVESTMENT_DIST) {
-          feasibilityScore += WEIGHTS.HIGH_INVESTMENT_ESCAPE_PRIORITY;
-        } else {
-          feasibilityScore += WEIGHTS.LOW_INVESTMENT_ESCAPE_PRIORITY;
-        }
-      }
-
-      if (
-        futureDist >= 1 &&
-        futureDist <= LOGIC_CONFIG.MAX_THREAT_LOOKAHEAD &&
-        isBotTokenAheadOfOppTokenInFuture
-      ) {
-        const threats = activeOpponentTokens.filter((t) => {
-          const dist = getDistanceBetweenTokens({ ...token, coordinates: finalCoord }, t);
-          const isOpponentBehind = isTokenAhead({ ...token, coordinates: finalCoord }, t);
-          return isOpponentBehind && dist >= 1 && dist <= LOGIC_CONFIG.DANGER_ZONE_RANGE;
-        });
-        const isGoingIntoDanger =
-          isBotTokenAheadOfOppTokenInFuture &&
-          !isBotTokenAheadOfOppTokenCurrently &&
-          !isFinalCoordSafe &&
-          threats.length > 0;
-
-        if (isGoingIntoDanger)
-          feasibilityScore -=
-            WEIGHTS.IMMINENT_CAPTURE_PENALTY * threats.length * Math.max(1, distFromStart / 2);
-
-        const isEscaping =
-          isBotTokenAheadOfOppTokenCurrently && futureDist > currentDist && !isCurrentCoordSafe;
-
-        if (
-          isEscaping ||
-          (isFinalCoordSafe && isBotTokenAheadOfOppTokenCurrently && !isCurrentCoordSafe)
-        ) {
-          if (isEscaping) {
-            feasibilityScore += (futureDist - currentDist) * WEIGHTS.ESCAPE_DISTANCE_MULTIPLIER;
-          }
-          if (currentDist <= LOGIC_CONFIG.CRITICAL_COMBAT_RANGE) {
-            if (isEscaping) feasibilityScore += WEIGHTS.CRITICAL_ESCAPE_BONUS;
-            if (!hasRefundedDistance) {
-              feasibilityScore += distFromHome * WEIGHTS.BASE_DISTANCE_PENALTY * endgameMultiplier;
-              hasRefundedDistance = true;
-            }
-          }
-          if (isFinalCoordSafe) feasibilityScore += WEIGHTS.SAFE_HAVEN_BONUS;
-          else if (isEscaping) feasibilityScore -= WEIGHTS.UNSAFE_ESCAPE_PENALTY;
-        } else {
-          // If we are not escaping, don't leave a safe spot just to stand in danger.
-          const isProtected = isFinalCoordSafe || willTokenBeInHomeEntryPath;
-          if (!isProtected && isCurrentCoordSafe && !isGoingIntoDanger)
-            feasibilityScore -= WEIGHTS.SAFE_SPOT_ABANDONMENT_PENALTY * safetyMultiplier;
-        }
-      }
-    }
-
-    // Try to stay on safe spots unless we have a reason to leave (like hunting).
-    if (isCurrentCoordSafe && !isSafeLaunchHunter && !isCrowdedSafeSpotAndRolled6) {
-      feasibilityScore -= WEIGHTS.SAFE_SPOT_EXIT_PENALTY;
-    }
-    // If two tokens are on the same spot, try to separate them to cover more board.
-    else if (botTokensInCurrentCoord > 1) {
-      feasibilityScore += botTokensInCurrentCoord * WEIGHTS.STACK_SPLIT_BONUS;
-    }
-
-    return { token, feasibilityScore };
-  });
-  if (tokenScores.length === 0) return null;
-  const maxScore = Math.max(...tokenScores.map((e) => e.feasibilityScore));
-  const tokensWithMaxFeasibilityScore = tokenScores
-    .filter((e) => e.feasibilityScore === maxScore)
-    .map((e) => e.token);
-
-  return (
-    tokensWithMaxFeasibilityScore[
-      Math.floor(Math.random() * tokensWithMaxFeasibilityScore.length)
-    ] || null
   );
+  if (teammateAtDest) {
+    // هل الزميل على مكان آمن؟ → لا يمكن أكله → مجرد تكديس
+    const teammateIsSafe = isCoordASafeSpot(teammateAtDest.coordinates, teammateAtDest.colour);
+    if (teammateIsSafe || finalIsStar) {
+      // لا أكل ممكن → منع التكديس فقط
+      if (!finalIsStar) score -= W.STACK_ON_TEAMMATE;
+    } else {
+      // أكل زميل → مكافأة صغيرة
+      score += W.EAT_TEAMMATE;
+    }
+  }
+
+  // ============================================================
+  // البقاء على نجمة
+  // ============================================================
+  if (isOnStar && finalIsStar) {
+    score += W.STAY_ON_STAR;
+    score += distTraveled * W.PROGRESS_PER_TILE;
+    return score;
+  }
+
+  // ============================================================
+  // مغادرة النجمة → عقوبة كبيرة
+  // ============================================================
+  if (isOnStar && !finalIsStar) {
+    const leaveCost = W.LEAVE_STAR_BASE + distTraveled * W.LEAVE_STAR_PER_PROGRESS;
+    score -= leaveCost;
+    if (enemiesAtFinal.weightedThreats > 0) {
+      score -= W.LEAVE_STAR_TO_DANGER_EXTRA;
+      score -= enemiesAtFinal.weightedThreats;
+    }
+    return score;
+  }
+
+  // ============================================================
+  // الدخول إلى نجمة
+  // ============================================================
+  if (!isOnStar && finalIsStar) {
+    score += W.ENTER_STAR;
+    score += distTraveled * W.PROGRESS_PER_TILE;
+    return score;
+  }
+
+  // ============================================================
+  // لا نجمة في الحالتين
+  // ============================================================
+  const wasSafe = profile.isRealSafeNow;
+  const willBeSafe = enemiesAtFinal.weightedThreats === 0;
+
+  if (!wasSafe && willBeSafe) {
+    // هروب من خطر → مكافأة كبيرة
+    score += W.ESCAPE_DANGER;
+    score += profile.weightedThreats;
+  } else if (wasSafe && !willBeSafe) {
+    // آمن → خطر → عقوبة
+    score -= W.SAFE_TO_DANGER;
+    score -= enemiesAtFinal.weightedThreats;
+  } else if (!wasSafe && !willBeSafe) {
+    // خطر → خطر
+    score -= enemiesAtFinal.weightedThreats;
+    score += profile.weightedThreats * 0.5;
+  } else {
+    // آمن → آمن
+    score += distTraveled * W.PROGRESS_PER_TILE;
+  }
+
+  // مكافأة الصيد (أنا خلف عدو)
+  score += enemiesAtFinal.huntingBonus;
+
+  // عقوبة وجود عدو خلفي مباشرة
+  if (enemiesAtFinal.nearestBehind !== 999) {
+    score -= threatByDistance(enemiesAtFinal.nearestBehind);
+  }
+
+  // مكافأة الطائر المتخلف إذا كانت حركته آمنة
+  if (willBeSafe && isBackwardToken(profile, allProfiles)) {
+    score += W.BACKWARD_BONUS;
+  }
+
+  // ضريبة تقدم بسيطة (لتشجيع الحركة)
+  score -= distToHome * W.PROGRESS_TAX;
+
+  return score;
+}
+
+// ================================================================
+// هل هذا الطائر الأكثر تخلفًا؟
+// ================================================================
+function isBackwardToken(profile: TokenProfile, allProfiles: TokenProfile[]): boolean {
+  const unlocked = allProfiles.filter((p) => !p.token.isLocked);
+  if (unlocked.length === 0) return false;
+  const maxDist = Math.max(...unlocked.map((p) => p.distToHome));
+  return profile.distToHome === maxDist;
 }
