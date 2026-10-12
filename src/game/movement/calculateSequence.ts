@@ -49,7 +49,7 @@ export const calculateSequence = (
 
   const isSafeTile = TOKEN_SAFE_COORDINATES.some((c) => areCoordsEqual(c, finalCoordinate));
 
-  if (!isSafeTile) {
+    if (!isSafeTile) {
     clonedPlayers.forEach((p) => {
       if (p.colour !== token.colour) {
         p.tokens.forEach((t) => {

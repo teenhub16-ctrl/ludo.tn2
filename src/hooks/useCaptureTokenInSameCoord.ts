@@ -14,6 +14,7 @@ import { getGloballyUniqueTokenId } from '../game/tokens/logic';
 import { useCoordsToPosition } from './useCoordsToPosition';
 import { tokenMotionRegistry } from '../game/movement/tokenMotionRegistry';
 import { sleep } from '../utils/sleep';
+import { playSound } from '../utils/sounds';
 
 export function useCaptureTokenInSameCoord() {
   const dispatch = useDispatch();
@@ -33,6 +34,7 @@ export function useCaptureTokenInSameCoord() {
           newAlignmentData: defaultTokenAlignmentData,
         })
       );
+      playSound('capture');
 
       const { durationMs, timingFn } = transitionStates.backward;
       const animationPromises: Promise<void>[] = [];
@@ -46,6 +48,7 @@ export function useCaptureTokenInSameCoord() {
           setTokenAlignmentData({ colour, id, newAlignmentData: defaultTokenAlignmentData })
         );
         const animateToken = async () => {
+          playSound('retreat');
           for (const coord of moveSequence) {
             const { x, y } = getPosition(coord, defaultTokenAlignmentData);
             await entry.animateTo(x, y, { duration: durationMs / 1000, ease: timingFn });

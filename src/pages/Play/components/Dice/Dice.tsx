@@ -20,6 +20,7 @@ import { useChangeTurn } from '../../../../hooks/useChangeTurn';
 import { logError } from '../../../../utils/logError';
 import { saveState } from '../../../../game/storage/saveState';
 
+import TurnTimer from './TurnTimer';
 type Props = {
   colour: TPlayerColour;
   playerName: string;
@@ -89,25 +90,30 @@ export default function Dice({ colour, playerName }: Props) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleDiceClick, isDiceDisabled]);
   return (
-    <div className={clsx(styles.diceContainer, styles[colour])}>
-      <button
-        className={clsx(styles.dice, {
-          [styles.active]: !isDiceDisabled,
-        })}
-        tabIndex={isDiceDisabled ? -1 : undefined}
-        title={!isDiceDisabled ? 'Roll Dice (Press D)' : undefined}
-        disabled={isDiceDisabled}
-        style={{ '--player-colour': playerColours[colour] } as React.CSSProperties}
-        type="button"
-        onClick={handleDiceClick}
-      >
+    <div
+  className={clsx(styles.diceContainer, styles[colour])}
+  style={{ '--player-colour': playerColours[colour] } as React.CSSProperties}
+>
+  <button
+    className={clsx(styles.dice, {
+      [styles.active]: !isDiceDisabled,
+    })}
+    tabIndex={isDiceDisabled ? -1 : undefined}
+    title={!isDiceDisabled ? 'Roll Dice (Press D)' : undefined}
+    disabled={isDiceDisabled}
+    type="button"
+    onClick={handleDiceClick}
+  >
         <img
           src={isPlaceholderShowing ? dicePlaceholder : getDiceImage(diceNumber)}
           alt="Dice image"
           aria-hidden="true"
         />
       </button>
-      <span className={styles.playerName}>{playerName}</span>
+          <div className={styles.playerInfo}>
+        <TurnTimer colour={colour} />
+        <span className={styles.playerName}>{playerName}</span>
+      </div>
     </div>
   );
 }

@@ -5,11 +5,11 @@ import type { TTokenDirection, TTokenPath } from '../../types/tokens';
 export const transitionStates = {
   forward: {
     timingFn: 'easeInOut',
-    durationMs: 500,
+    durationMs: 310,
   },
   backward: {
     timingFn: 'linear',
-    durationMs: 100,
+    durationMs: 70,
   },
 } as const satisfies Record<TTokenDirection, { durationMs: number; timingFn: Easing }>;
 

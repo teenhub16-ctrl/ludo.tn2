@@ -10,8 +10,9 @@ import {
   incrementNumberOfConsecutiveSix,
   resetNumberOfConsecutiveSix,
 } from '../state/slices/playersSlice';
+import { playSound } from '../utils/sounds';
 
-const DICE_PLACEHOLDER_DELAY = 1000;
+const DICE_PLACEHOLDER_DELAY = 1400;
 
 export const useRollDice = () => {
   const store = useStore<RootState>();
@@ -19,6 +20,7 @@ export const useRollDice = () => {
   return useCallback(
     async (colour: TPlayerColour): Promise<number> => {
       if (store.getState().players.isGameEnded) throw new Error(ERRORS.gameEnded());
+      playSound('diceRoll');
       dispatch(setIsPlaceholderShowing({ colour, isPlaceholderShowing: true }));
       await sleep(DICE_PLACEHOLDER_DELAY);
       const diceState = store.getState().dice;

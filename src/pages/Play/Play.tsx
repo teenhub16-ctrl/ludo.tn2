@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { useCleanup } from '../../hooks/useCleanup';
 import type { TPlayerInitData } from '../../types';
 import { isStorageSupported, saveExists } from '../../game/storage/storage';
+import { playSound, unlockAllSounds } from '../../utils/sounds';
 
 let hasWarnedAboutStorage = false;
 
@@ -23,6 +24,14 @@ export default function Play() {
       alert("Saving is currently unavailable. Your progress won't be saved this session.");
     }
   }, []);
+
+  useEffect(() => {
+    if (initData) {
+      unlockAllSounds().then(() => {
+        playSound('gameStart');
+      });
+    }
+  }, [initData]);
 
   return !initData && !saveExists() ? <Navigate to="/setup" /> : <Game initData={initData} />;
 }

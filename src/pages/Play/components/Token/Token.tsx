@@ -8,7 +8,10 @@ import { type TPlayer, type TPlayerColour, type TTokenClickData } from '../../..
 import { type TToken } from '../../../../types';
 import { useDispatch, useSelector, useStore } from 'react-redux';
 import type { AppDispatch, RootState } from '../../../../state/store';
-import TokenImage from '../../../../assets/token.svg?react';
+import TokenRed from '../../../../assets/token-red.svg?react';
+import TokenGreen from '../../../../assets/token-green.svg?react';
+import TokenYellow from '../../../../assets/token-yellow.svg?react';
+import TokenBlue from '../../../../assets/token-blue.svg?react';
 import { useCoordsToPosition } from '../../../../hooks/useCoordsToPosition';
 import { useMoveAndCaptureToken } from '../../../../hooks/useMoveAndCaptureToken';
 import { playerColours } from '../../../../game/players/constants';
@@ -22,6 +25,7 @@ import { saveState } from '../../../../game/storage/saveState';
 import { animate, motion, useMotionValue } from 'framer-motion';
 import { tokenMotionRegistry } from '../../../../game/movement/tokenMotionRegistry';
 import { logError } from '../../../../utils/logError';
+import { playSound } from '../../../../utils/sounds';
 
 type Props = {
   colour: TPlayerColour;
@@ -90,6 +94,7 @@ export default function Token({ colour, id, tokenClickData }: Props) {
 
   const unlock = async () => {
     try {
+       playSound('tokenExit');
       dispatch(setIsAnyTokenMoving(true));
       unlockAndAlignTokens({ colour, id });
       dispatch(deactivateAllTokens(colour));
@@ -182,15 +187,10 @@ export default function Token({ colour, id, tokenClickData }: Props) {
       }}
     >
       <span className={clsx(styles.bouncer, { [styles.active]: isActive && !isCurrentlyFocused })}>
-        <TokenImage
-          className={styles.svg}
-          aria-hidden="true"
-          style={
-            {
-              '--fill-colour': playerColours[colour],
-            } as React.CSSProperties
-          }
-        />
+       {colour === 'red' && <TokenRed className={styles.svg} aria-hidden="true" />}
+{colour === 'green' && <TokenGreen className={styles.svg} aria-hidden="true" />}
+{colour === 'yellow' && <TokenYellow className={styles.svg} aria-hidden="true" />}
+{colour === 'blue' && <TokenBlue className={styles.svg} aria-hidden="true" />}
       </span>
     </motion.button>
   );
